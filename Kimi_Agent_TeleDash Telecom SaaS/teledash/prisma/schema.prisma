@@ -1,0 +1,1005 @@
+// TeleDash Prisma Schema
+// Multi-tenant SaaS for Telecom Agent Dashboard
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================
+// User & Authentication
+// ============================================
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  name          String?
+  image         String?
+  password      String?   // For credentials provider
+  
+  // Profile
+  phone         String?
+  timezone      String    @default("Africa/Accra")
+  language      String    @default("en")
+  
+  // Status
+  status        UserStatus @default(ACTIVE)
+  lastLoginAt   DateTime?
+  
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  // Relations
+  accounts      Account[]
+  sessions      Session[]
+  memberships   OrganizationMember[]
+  ownedOrgs     Organization[]       @relation("OrganizationOwner")
+  
+  // Personal credentials (BYOK)
+  credentials   UserCredential[]
+  
+  // Activity
+  activities    ActivityLog[]
+  apiCalls      ApiCallLog[]
+  
+  // Agent-specific data
+  agentProfile  AgentProfile?
+  
+  @@index([email])
+  @@index([status])
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ============================================
+// Multi-Tenancy: Organizations
+// ============================================
+
+model Organization {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  description String?
+  
+  // Branding
+  logo        String?
+  primaryColor String? @default("#00F0FF")
+  
+  // Status
+  status      OrganizationStatus @default(ACTIVE)
+  
+  // Billing
+  subscriptionStatus SubscriptionStatus @default(TRIAL)
+  subscriptionTier   SubscriptionTier   @default(STARTER)
+  trialEndsAt        DateTime?
+  stripeCustomerId   String?
+  stripeSubscriptionId String?
+  
+  // Timestamps
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  ownerId     String
+  owner       User     @relation("OrganizationOwner", fields: [ownerId], references: [id])
+  members     OrganizationMember[]
+  
+  // Organization-scoped data
+  customers         Customer[]
+  interactions      Interaction[]
+  tickets           Ticket[]
+  churnPredictions  ChurnPrediction[]
+  transactions      Transaction[]
+  networkAlerts     NetworkAlert[]
+  workflows         Workflow[]
+  templates         Template[]
+  credentials       OrganizationCredential[]
+  usageStats        UsageStat[]
+  agentPerformance  AgentPerformance[]
+  
+  // Settings
+  settings          OrganizationSettings?
+  
+  // Activity
+  activities        ActivityLog[]
+  
+  @@index([slug])
+  @@index([status])
+  @@index([subscriptionStatus])
+  @@map("organizations")
+}
+
+model OrganizationMember {
+  id             String           @id @default(cuid())
+  organizationId String
+  userId         String
+  role           OrganizationRole @default(AGENT)
+  
+  // Permissions override
+  permissions    Json?            // Custom permissions JSON
+  
+  joinedAt       DateTime         @default(now())
+  invitedBy      String?
+  
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+  @@index([userId])
+  @@map("organization_members")
+}
+
+model OrganizationSettings {
+  id                    String       @id @default(cuid())
+  organizationId        String       @unique
+  organization          Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  // Feature flags
+  enableChurnPrediction Boolean      @default(true)
+  enableNetworkMonitoring Boolean    @default(true)
+  enableWorkflowBuilder Boolean      @default(true)
+  enableMobileMoney     Boolean      @default(true)
+  
+  // Call routing
+  defaultCallRouting    Json?        // Routing rules
+  businessHours         Json?        // { monday: { open: "09:00", close: "17:00" } }
+  
+  // Notifications
+  notificationSettings  Json?        // Email, SMS, webhook configs
+  
+  // Compliance
+  dataRetentionDays     Int          @default(365)
+  requireConsent        Boolean      @default(true)
+  
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+  
+  @@map("organization_settings")
+}
+
+// ============================================
+// Agent Profile & Performance
+// ============================================
+
+model AgentProfile {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Agent details
+  employeeId      String?
+  department      String?
+  skills          String[] // Array of skill tags
+  languages       String[] // Languages spoken
+  
+  // Performance metrics (cached)
+  avgResponseTime Int?     // Average response time in seconds
+  resolutionRate  Float?   // Percentage
+  csatScore       Float?   // Customer satisfaction 0-5
+  
+  // Status
+  isOnline        Boolean  @default(false)
+  currentStatus   AgentStatus @default(OFFLINE)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@map("agent_profiles")
+}
+
+model AgentPerformance {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  agentId        String
+  date           DateTime
+  
+  // Metrics
+  ticketsHandled Int          @default(0)
+  ticketsResolved Int         @default(0)
+  avgHandleTime  Int?         // Average handle time in seconds
+  firstContactResolution Float?
+  csatScore      Float?
+  
+  // Call metrics
+  callsAnswered  Int          @default(0)
+  avgCallDuration Int?        // In seconds
+  
+  // Calculated score
+  performanceScore Float?
+  
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  
+  @@unique([organizationId, agentId, date])
+  @@index([organizationId])
+  @@index([agentId])
+  @@index([date])
+  @@map("agent_performance")
+}
+
+// ============================================
+// Customers
+// ============================================
+
+model Customer {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  // Identity
+  customerCode   String       @unique // Organization-scoped unique code
+  phoneNumber    String
+  email          String?
+  name           String?
+  
+  // Demographics
+  region         String?      // Ghana region
+  city           String?
+  address        String?
+  
+  // Telecom data
+  networkProvider String?     // MTN, Telecel, AirtelTigo
+  planType       String?      // Prepaid, Postpaid, etc.
+  accountBalance Decimal?     @db.Decimal(10, 2)
+  
+  // Status
+  status         CustomerStatus @default(ACTIVE)
+  riskLevel      RiskLevel      @default(LOW)
+  
+  // Churn prediction
+  churnScore     Float?         // 0-100
+  churnRisk      ChurnRiskLevel @default(UNKNOWN)
+  lastPredictionAt DateTime?
+  
+  // Consent (GDPR/Ghana Data Protection)
+  consentGiven   Boolean        @default(false)
+  consentDate    DateTime?
+  consentVersion String?
+  
+  // Timestamps
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  
+  // Relations
+  interactions   Interaction[]
+  tickets        Ticket[]
+  transactions   Transaction[]
+  usageStats     CustomerUsage[]
+  
+  @@index([organizationId])
+  @@index([phoneNumber])
+  @@index([status])
+  @@index([riskLevel])
+  @@index([churnRisk])
+  @@map("customers")
+}
+
+// ============================================
+// Interactions (Calls, SMS)
+// ============================================
+
+model Interaction {
+  id             String            @id @default(cuid())
+  organizationId String
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  customerId     String
+  customer       Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  
+  // Interaction details
+  type           InteractionType
+  direction      Direction
+  status         InteractionStatus
+  
+  // Timing
+  startedAt      DateTime
+  endedAt        DateTime?
+  duration       Int?              // In seconds
+  
+  // Content
+  notes          String?
+  recordingUrl   String?
+  transcript     String?
+  
+  // Routing
+  agentId        String?
+  forwardedFrom  String?
+  forwardedTo    String?
+  
+  // Quality
+  qualityScore   Float?
+  
+  // Metadata
+  metadata       Json?
+  
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  
+  @@index([organizationId])
+  @@index([customerId])
+  @@index([type])
+  @@index([status])
+  @@index([startedAt])
+  @@map("interactions")
+}
+
+// ============================================
+// Support Tickets
+// ============================================
+
+model Ticket {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  ticketNumber   String       @unique // e.g., #4821
+  
+  customerId     String
+  customer       Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  
+  // Ticket details
+  subject        String
+  description    String
+  category       TicketCategory
+  priority       Priority     @default(MEDIUM)
+  status         TicketStatus @default(OPEN)
+  
+  // Assignment
+  assignedTo     String?      // Agent ID
+  assignedAt     DateTime?
+  
+  // Timing
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  resolvedAt     DateTime?
+  closedAt       DateTime?
+  
+  // SLA
+  slaDeadline    DateTime?
+  slaBreached    Boolean      @default(false)
+  firstResponseAt DateTime?
+  
+  // Relations
+  comments       TicketComment[]
+  
+  @@index([organizationId])
+  @@index([customerId])
+  @@index([status])
+  @@index([priority])
+  @@index([assignedTo])
+  @@map("tickets")
+}
+
+model TicketComment {
+  id        String   @id @default(cuid())
+  ticketId  String
+  ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  
+  authorId  String
+  authorType String  // AGENT, SYSTEM, CUSTOMER
+  
+  content   String
+  isInternal Boolean @default(false)
+  
+  createdAt DateTime @default(now())
+  
+  @@index([ticketId])
+  @@map("ticket_comments")
+}
+
+// ============================================
+// Churn Prediction
+// ============================================
+
+model ChurnPrediction {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  customerId     String?
+  
+  // Prediction
+  predictionDate DateTime
+  modelVersion   String
+  
+  // Metrics
+  totalCustomers Int
+  atRiskCount    Int
+  highRiskCount  Int
+  mediumRiskCount Int
+  lowRiskCount   Int
+  
+  // Revenue impact
+  revenueAtRisk  Decimal?     @db.Decimal(12, 2)
+  
+  // Details
+  details        Json?        // Array of customer predictions
+  
+  createdAt      DateTime     @default(now())
+  
+  @@index([organizationId])
+  @@index([predictionDate])
+  @@map("churn_predictions")
+}
+
+// ============================================
+// Transactions & Billing
+// ============================================
+
+model Transaction {
+  id             String            @id @default(cuid())
+  organizationId String
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  customerId     String
+  customer       Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  
+  // Transaction details
+  transactionId  String            @unique
+  type           TransactionType
+  amount         Decimal           @db.Decimal(10, 2)
+  currency       String            @default("GHS")
+  
+  // Payment method
+  paymentMethod  PaymentMethod
+  provider       String?           // MTN MoMo, Telecel Cash, AirtelTigo
+  providerRef    String?
+  
+  // Status
+  status         TransactionStatus
+  
+  // Timing
+  initiatedAt    DateTime          @default(now())
+  completedAt    DateTime?
+  
+  // Reconciliation
+  reconciled     Boolean           @default(false)
+  reconciledAt   DateTime?
+  reconciliationNotes String?
+  
+  // Metadata
+  metadata       Json?
+  
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  
+  @@index([organizationId])
+  @@index([customerId])
+  @@index([status])
+  @@index([transactionId])
+  @@map("transactions")
+}
+
+// ============================================
+// Network Monitoring
+// ============================================
+
+model NetworkAlert {
+  id             String          @id @default(cuid())
+  organizationId String
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  // Alert details
+  alertType      NetworkAlertType
+  severity       AlertSeverity
+  title          String
+  description    String
+  
+  // Location
+  region         String?
+  city           String?
+  coordinates    Json?           // { lat: number, lng: number }
+  
+  // Status
+  status         AlertStatus     @default(ACTIVE)
+  
+  // Timing
+  detectedAt     DateTime        @default(now()))
+  resolvedAt     DateTime?
+  
+  // Impact
+  affectedCustomers Int?
+  
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  
+  @@index([organizationId])
+  @@index([alertType])
+  @@index([severity])
+  @@index([status])
+  @@map("network_alerts")
+}
+
+// ============================================
+// Usage Statistics
+// ============================================
+
+model UsageStat {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  date           DateTime
+  
+  // Voice
+  totalCalls     Int          @default(0)
+  totalCallDuration Int       @default(0) // In seconds
+  
+  // Data
+  totalDataUsed  BigInt       @default(0) // In bytes
+  
+  // SMS
+  totalSMS       Int          @default(0)
+  
+  // Financial
+  totalRevenue   Decimal?     @db.Decimal(12, 2)
+  
+  // Customers
+  activeCustomers Int         @default(0)
+  newCustomers   Int          @default(0)
+  churnedCustomers Int        @default(0)
+  
+  createdAt      DateTime     @default(now())
+  
+  @@unique([organizationId, date])
+  @@index([organizationId])
+  @@index([date])
+  @@map("usage_stats")
+}
+
+model CustomerUsage {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  
+  date       DateTime
+  
+  // Usage
+  callsMade  Int      @default(0)
+  callDuration Int    @default(0) // In seconds
+  dataUsed   BigInt   @default(0) // In bytes
+  smsSent    Int      @default(0)
+  
+  // Spend
+  amountSpent Decimal? @db.Decimal(10, 2)
+  
+  createdAt  DateTime @default(now())
+  
+  @@unique([customerId, date])
+  @@index([customerId])
+  @@index([date])
+  @@map("customer_usage")
+}
+
+// ============================================
+// Workflows
+// ============================================
+
+model Workflow {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  name           String
+  description    String?
+  
+  // Workflow definition (React Flow format)
+  definition     Json
+  
+  // Status
+  isActive       Boolean      @default(true)
+  isTemplate     Boolean      @default(false)
+  
+  // Triggers
+  triggers       WorkflowTrigger[]
+  
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  
+  @@index([organizationId])
+  @@map("workflows")
+}
+
+model WorkflowTrigger {
+  id         String          @id @default(cuid())
+  workflowId String
+  workflow   Workflow        @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  
+  type       TriggerType
+  conditions Json?           // Trigger conditions
+  
+  createdAt  DateTime        @default(now())
+  
+  @@index([workflowId])
+  @@map("workflow_triggers")
+}
+
+// ============================================
+// Templates
+// ============================================
+
+model Template {
+  id             String         @id @default(cuid())
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  name           String
+  description    String?
+  type           TemplateType
+  
+  // Template content
+  content        Json
+  
+  // Status
+  isSystem       Boolean        @default(false)
+  isActive       Boolean        @default(true)
+  
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  
+  @@index([organizationId])
+  @@index([type])
+  @@map("templates")
+}
+
+// ============================================
+// Credentials & Secrets Management
+// ============================================
+
+model UserCredential {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  name        String   // e.g., "MTN MoMo API Key"
+  type        String   // e.g., "mtn_momo", "stripe", "webhook"
+  
+  // Encrypted values
+  encryptedValue String
+  encryptedKey   String   // Encryption key identifier
+  
+  // Metadata
+  metadata    Json?    // Non-sensitive config
+  
+  isActive    Boolean  @default(true)
+  expiresAt   DateTime?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([userId])
+  @@index([type])
+  @@map("user_credentials")
+}
+
+model OrganizationCredential {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  name           String
+  type           String
+  
+  // Encrypted values
+  encryptedValue String
+  encryptedKey   String
+  
+  metadata       Json?
+  
+  isActive       Boolean      @default(true)
+  expiresAt      DateTime?
+  
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  
+  @@index([organizationId])
+  @@index([type])
+  @@map("organization_credentials")
+}
+
+// ============================================
+// Activity & Audit Logging
+// ============================================
+
+model ActivityLog {
+  id             String       @id @default(cuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  
+  userId         String?
+  user           User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  // Action details
+  action         String       // e.g., "customer.create", "ticket.update"
+  entityType     String       // e.g., "customer", "ticket"
+  entityId       String?
+  
+  // Data (redacted for sensitive info)
+  before         Json?
+  after          Json?
+  
+  // Context
+  ipAddress      String?
+  userAgent      String?
+  
+  // Result
+  success        Boolean      @default(true)
+  errorMessage   String?
+  
+  createdAt      DateTime     @default(now())
+  
+  @@index([organizationId])
+  @@index([userId])
+  @@index([action])
+  @@index([entityType])
+  @@index([createdAt])
+  @@map("activity_logs")
+}
+
+model ApiCallLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  // Request
+  method     String
+  path       String
+  headers    Json?
+  body       Json?
+  
+  // Response
+  statusCode Int?
+  response   Json?
+  
+  // Timing
+  startedAt  DateTime @default(now())
+  duration   Int?     // In milliseconds
+  
+  // Result
+  success    Boolean  @default(true)
+  error      String?
+  
+  @@index([userId])
+  @@index([path])
+  @@index([startedAt])
+  @@map("api_call_logs")
+}
+
+// ============================================
+// Enums
+// ============================================
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  PENDING
+}
+
+enum OrganizationStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum OrganizationRole {
+  OWNER
+  ADMIN
+  SUPERVISOR
+  AGENT
+  VIEWER
+}
+
+enum AgentStatus {
+  ONLINE
+  OFFLINE
+  BUSY
+  AWAY
+  ON_CALL
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+}
+
+enum SubscriptionTier {
+  STARTER
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  CHURNED
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum ChurnRiskLevel {
+  UNKNOWN
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum InteractionType {
+  CALL
+  SMS
+  EMAIL
+  WHATSAPP
+  CHAT
+}
+
+enum Direction {
+  INBOUND
+  OUTBOUND
+}
+
+enum InteractionStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  MISSED
+}
+
+enum TicketCategory {
+  BILLING
+  TECHNICAL
+  SALES
+  GENERAL
+  COMPLAINT
+  PORTING
+  ROAMING
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING
+  RESOLVED
+  CLOSED
+  ESCALATED
+}
+
+enum TransactionType {
+  PAYMENT
+  REFUND
+  TOPUP
+  TRANSFER
+}
+
+enum PaymentMethod {
+  MOBILE_MONEY
+  CARD
+  BANK_TRANSFER
+  CASH
+}
+
+enum TransactionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+enum NetworkAlertType {
+  OUTAGE
+  DEGRADATION
+  CONGESTION
+  MAINTENANCE
+  SECURITY
+}
+
+enum AlertSeverity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum AlertStatus {
+  ACTIVE
+  ACKNOWLEDGED
+  RESOLVED
+  IGNORED
+}
+
+enum WorkflowTrigger {
+  TICKET_CREATED
+  TICKET_UPDATED
+  CUSTOMER_CREATED
+  CHURN_RISK_DETECTED
+  TRANSACTION_COMPLETED
+  SCHEDULED
+}
+
+enum TriggerType {
+  TICKET_CREATED
+  TICKET_UPDATED
+  CUSTOMER_CREATED
+  CHURN_RISK_DETECTED
+  TRANSACTION_COMPLETED
+  SCHEDULED
+  MANUAL
+}
+
+enum TemplateType {
+  DASHBOARD
+  WORKFLOW
+  CHURN_MODEL
+  ROUTING_RULE
+  REPORT
+}
